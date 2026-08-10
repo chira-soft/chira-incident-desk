@@ -25,6 +25,7 @@ jobs:
       RADAR_MIN_SCORE: "75"
       RADAR_RECENT_ATTEMPT_DAYS: "45"
       RADAR_REQUEST_DELAY_MS: "350"
+      RADAR_MAX_PER_REPOSITORY: "3"
       RADAR_PREFERRED_LANGUAGES: "TypeScript,JavaScript,Java,Python,PHP,Dockerfile,Shell"
 
     steps:
@@ -35,6 +36,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Validate radar
+        run: npm test && npm run check
 
       - name: Run verified radar
         run: npm run radar
