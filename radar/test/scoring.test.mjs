@@ -9,12 +9,21 @@ const config = {
   preferredLanguages: new Set(["typescript", "python"]),
 };
 
-test("extracts an Algora-style bounty command", () => {
+test("extracts an Algora-style bounty command without assuming funding", () => {
   const result = extractPaymentEvidence(["/bounty $250", "Algora funded"]);
   assert.equal(result.amount, 250);
   assert.equal(result.currency, "USD");
   assert.ok(result.signals.includes("/bounty command"));
   assert.ok(result.signals.includes("Algora reference"));
+  assert.equal(result.fundingStatus, "offered");
+});
+
+test("marks explicit bounty funding confirmation as confirmed", () => {
+  const result = extractPaymentEvidence([
+    "Algora bounty is funded. Funding confirmed and payment escrowed: $250.",
+  ]);
+  assert.equal(result.amount, 250);
+  assert.equal(result.currency, "USD");
   assert.equal(result.fundingStatus, "confirmed");
 });
 
