@@ -41,7 +41,7 @@ export class GitHubClient {
   async searchIssues(query, perPage = 100) {
     const url = new URL("https://api.github.com/search/issues");
     url.searchParams.set("q", query);
-    url.searchParams.set("sort", "created");
+    url.searchParams.set("sort", "updated");
     url.searchParams.set("order", "desc");
     url.searchParams.set("per_page", String(Math.min(perPage, 100)));
     const result = await this.#request(url.toString());
@@ -58,40 +58,33 @@ export class GitHubClient {
     return this.#request(repositoryUrl);
   }
 
-  async #searchPullRequests(query) {
-    const url = new URL("https://api.github.com/search/issues");
-    url.searchParams.set("q", query);
-    url.searchParams.set("sort", "updated");
-    url.searchParams.set("order", "desc");
-    url.searchParams.set("per_page", "10");
-    const result = await this.#request(url.toString());
-    return result.items ?? [];
+  async getIssueTimeline(repository, issueNumber) {
+    const url = new URL(`https://api.github.com/repos/${repository}/issues/${issueNumber}/timeline`);
+    url.searchParams.set("per_page", "100");
+    return this.#request(url.toString());
   }
 
-  async findLinkedOpenPullRequests(repository, issueNumber, issueUrl) {
+  async findLinkedOpenPullRequests(repository, issueNumber) {
     const results = new Map();
-    const queries = [
-      `repo:${repository} is:pr is:open "${issueUrl}"`,
-      `repo:${repository} is:pr is:open "#${issueNumber}"`,
-    ];
-
-    for (const query of queries) {
-      try {
-        const items = await this.#searchPullRequests(query);
-        for (const item of items) {
-          results.set(item.html_url, {
-            number: item.number,
-            title: item.title,
-            html_url: item.html_url,
-            state: item.state,
-            updated_at: item.updated_at,
-          });
-        }
-      } catch (error) {
-        console.warn(`Linked PR search skipped for ${repository}#${issueNumber}:`, error.message);
+    try {
+      const timeline = await this.getIssueTimeline(repository, issueNumber);
+      for (const event of timeline) {
+        if (event.event !== "cross-referenced") continue;
+        const sourceIssue = event.source?.issue;
+        if (!sourceIssue?.pull_request || sourceIssue.state !== "open") continue;
+        const sourceRepo = sourceIssue.repository?.full_name;
+        if (sourceRepo && sourceRepo !== repository) continue;
+        results.set(sourceIssue.html_url, {
+          number: sourceIssue.number,
+          title: sourceIssue.title,
+          html_url: sourceIssue.html_url,
+          state: sourceIssue.state,
+          updated_at: sourceIssue.updated_at,
+        });
       }
+    } catch (error) {
+      console.warn(`Linked PR timeline check skipped for ${repository}#${issueNumber}:`, error.message);
     }
-
     return [...results.values()];
   }
 }
