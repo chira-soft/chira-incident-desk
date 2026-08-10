@@ -19,6 +19,7 @@ jobs:
         working-directory: radar
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SUPERTEAM_AGENT_API_KEY: ${{ secrets.SUPERTEAM_AGENT_API_KEY }}
       RADAR_LOOKBACK_DAYS: "14"
       RADAR_MAX_CANDIDATES: "30"
       RADAR_MIN_AMOUNT: "50"
@@ -27,6 +28,10 @@ jobs:
       RADAR_REQUEST_DELAY_MS: "350"
       RADAR_MAX_PER_REPOSITORY: "3"
       RADAR_PREFERRED_LANGUAGES: "TypeScript,JavaScript,Java,Python,PHP,Dockerfile,Shell"
+      SUPERTEAM_MIN_REWARD: "100"
+      SUPERTEAM_MIN_SCORE: "75"
+      SUPERTEAM_MAX_CANDIDATES: "50"
+      SUPERTEAM_MAX_SUBMISSIONS: "50"
 
     steps:
       - name: Checkout
@@ -40,7 +45,7 @@ jobs:
       - name: Validate radar
         run: npm test && npm run check
 
-      - name: Run verified radar
+      - name: Run CHIRA income radar
         run: npm run radar
 
       - name: Add report to job summary
@@ -54,6 +59,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verified-bounty-radar-${{ github.run_number }}
+          name: chira-income-radar-${{ github.run_number }}
           path: radar/output/
           retention-days: 14
