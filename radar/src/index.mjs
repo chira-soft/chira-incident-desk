@@ -6,25 +6,19 @@ import { buildCandidate, loadNumericConfig } from "./scoring.mjs";
 
 function requiredToken() {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-  if (!token) {
-    throw new Error("GITHUB_TOKEN or GH_TOKEN is required. Use a read-only token and never commit it.");
-  }
+  if (!token) throw new Error("GITHUB_TOKEN or GH_TOKEN is required. Use a read-only token and never commit it.");
   return token;
 }
 
 function isoDateDaysAgo(days) {
-  const date = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  return date.toISOString().slice(0, 10);
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 function loadConfig() {
   const preferredLanguages = new Set(
     (process.env.RADAR_PREFERRED_LANGUAGES ?? "TypeScript,JavaScript,Java,Python,PHP,Dockerfile,Shell")
-      .split(",")
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean),
+      .split(",").map((value) => value.trim().toLowerCase()).filter(Boolean),
   );
-
   return {
     token: requiredToken(),
     lookbackDays: loadNumericConfig("RADAR_LOOKBACK_DAYS", 14),
@@ -42,9 +36,7 @@ function loadConfig() {
 function dedupeIssues(items) {
   const byUrl = new Map();
   for (const item of items) byUrl.set(item.html_url, item);
-  return [...byUrl.values()].sort(
-    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-  );
+  return [...byUrl.values()].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
 }
 
 function selectDiverseIssues(items, maxCandidates, maxPerRepository) {
@@ -62,7 +54,7 @@ function selectDiverseIssues(items, maxCandidates, maxPerRepository) {
 }
 
 function escapeCell(value) {
-  return value.replaceAll("|", "\\|").replaceAll("\n", " ");
+  return String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
 function amountLabel(candidate) {
@@ -77,13 +69,12 @@ function competitionLabel(candidate) {
 
 function renderTable(candidates) {
   if (candidates.length === 0) return "_No candidates in this section._\n";
-  const rows = candidates.map(
-    (candidate) =>
-      `| ${candidate.score} | ${escapeCell(amountLabel(candidate))} | ${escapeCell(candidate.repositoryLanguage ?? "Unknown")} | ${escapeCell(competitionLabel(candidate))} | ${candidate.ageDays}d | [${escapeCell(`${candidate.repository}#${candidate.issueNumber}`)}](${candidate.url}) — ${escapeCell(candidate.title)} |`,
+  const rows = candidates.map((candidate) =>
+    `| ${candidate.score} | ${escapeCell(amountLabel(candidate))} | ${escapeCell(candidate.payment.fundingStatus)} | ${escapeCell(candidate.repositoryLanguage ?? "Unknown")} | ${escapeCell(competitionLabel(candidate))} | ${candidate.ageDays}d | [${escapeCell(`${candidate.repository}#${candidate.issueNumber}`)}](${candidate.url}) — ${escapeCell(candidate.title)} |`,
   );
   return [
-    "| Score | Amount | Language | Competition | Age | Issue |",
-    "|---:|---:|---|---|---:|---|",
+    "| Score | Amount | Funding | Language | Competition | Age | Issue |",
+    "|---:|---:|---|---|---|---:|---|",
     ...rows,
     "",
   ].join("\n");
@@ -91,28 +82,33 @@ function renderTable(candidates) {
 
 function renderMarkdown(candidates, config) {
   const sorted = [...candidates].sort((a, b) => b.score - a.score);
-  const qualified = sorted.filter((candidate) => candidate.qualified);
+  const ready = sorted.filter((candidate) => candidate.qualified);
+  const preflight = sorted.filter((candidate) => candidate.preflight);
   const watchThreshold = Math.max(50, config.minScore - 20);
-  const watch = sorted.filter((candidate) => !candidate.qualified && candidate.score >= watchThreshold);
+  const watch = sorted.filter((candidate) => !candidate.qualified && !candidate.preflight && candidate.score >= watchThreshold);
   const rejected = sorted.filter((candidate) => candidate.score < watchThreshold);
 
-  const details = sorted.slice(0, 15).map((candidate) => `### ${candidate.qualified ? "✅" : "⚠️"} ${candidate.repository}#${candidate.issueNumber} — ${candidate.score}/100
+  const details = sorted.slice(0, 15).map((candidate) => {
+    const icon = candidate.qualified ? "✅" : candidate.preflight ? "🟡" : "⚠️";
+    return `### ${icon} ${candidate.repository}#${candidate.issueNumber} — ${candidate.score}/100
 
 - **Issue:** [${candidate.title}](${candidate.url})
 - **Amount:** ${amountLabel(candidate)}
+- **Funding status:** ${candidate.payment.fundingStatus}
 - **Payment signals:** ${candidate.payment.signals.join(", ") || "None detected"}
 - **Recent attempts:** ${candidate.recentAttemptUsers.join(", ") || "None detected"}
 - **Recent claims/rewards:** ${candidate.recentClaimUsers.join(", ") || "None detected"}
 - **Linked open PRs:** ${candidate.linkedOpenPullRequests.map((pr) => `#${pr.number}`).join(", ") || "None detected"}
 - **Reasons:** ${candidate.reasons.join("; ") || "None"}
 - **Warnings:** ${candidate.warnings.join("; ") || "None"}
-`).join("\n");
+`;
+  }).join("\n");
 
   return `# Verified Bounty Radar
 
 Generated: ${new Date().toISOString()}
 
-This is a conservative discovery report. **Do not claim or implement a task until a human verifies funding, payout eligibility, assignment, competing pull requests, and maintainer acceptance.**
+This is a conservative discovery report. **Do not claim or implement a task until funding, payout eligibility, assignment, competing pull requests, and maintainer acceptance are verified.**
 
 ## Configuration
 
@@ -122,9 +118,14 @@ This is a conservative discovery report. **Do not claim or implement a task unti
 - Maximum candidates: ${config.maxCandidates}
 - Maximum per repository: ${config.maxPerRepository}
 
-## Qualified for human preflight (${qualified.length})
+## Ready — funding appears confirmed (${ready.length})
 
-${renderTable(qualified)}
+${renderTable(ready)}
+## Payment/funding preflight (${preflight.length})
+
+These are promising leads, but **do not start implementation yet**. Confirm that the bounty is funded/active and that we are eligible or delegated to claim it.
+
+${renderTable(preflight)}
 ## Watchlist (${watch.length})
 
 ${renderTable(watch)}
@@ -155,11 +156,7 @@ async function main() {
     discovered.push(...await client.searchIssues(query, 100));
   }
 
-  const issues = selectDiverseIssues(
-    dedupeIssues(discovered),
-    config.maxCandidates,
-    config.maxPerRepository,
-  );
+  const issues = selectDiverseIssues(dedupeIssues(discovered), config.maxCandidates, config.maxPerRepository);
   console.log(`Evaluating ${issues.length} unique candidates.`);
   const candidates = [];
 
@@ -170,10 +167,7 @@ async function main() {
         client.getRepository(issue.repository_url),
         client.getComments(issue.comments_url),
       ]);
-      const linkedPullRequests = await client.findLinkedOpenPullRequests(
-        repository.full_name,
-        issue.number,
-      );
+      const linkedPullRequests = await client.findLinkedOpenPullRequests(repository.full_name, issue.number);
       candidates.push(buildCandidate(issue, repository, comments, linkedPullRequests, config));
     } catch (error) {
       console.error(`Candidate skipped: ${issue.html_url}`, error.message);
@@ -186,8 +180,9 @@ async function main() {
   await writeFile(jsonPath, JSON.stringify(candidates, null, 2), "utf8");
   await writeFile(markdownPath, renderMarkdown(candidates, config), "utf8");
 
-  const qualified = candidates.filter((candidate) => candidate.qualified).length;
-  console.log(`Done. Qualified=${qualified}, evaluated=${candidates.length}`);
+  const ready = candidates.filter((candidate) => candidate.qualified).length;
+  const preflight = candidates.filter((candidate) => candidate.preflight).length;
+  console.log(`Done. Ready=${ready}, preflight=${preflight}, evaluated=${candidates.length}`);
   console.log(markdownPath);
 }
 
