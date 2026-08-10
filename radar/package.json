@@ -1,13 +1,13 @@
 {
   "name": "@chira-soft/verified-bounty-radar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A conservative GitHub bounty preflight scanner that rejects stale, assigned, solved, or crowded issues.",
+  "description": "A conservative income radar for GitHub bounties and Superteam agent-eligible opportunities.",
   "scripts": {
     "radar": "node src/index.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/github.mjs && node --check src/scoring.mjs && node --check src/index.mjs"
+    "check": "node --check src/github.mjs && node --check src/scoring.mjs && node --check src/superteam.mjs && node --check src/index.mjs"
   },
   "engines": {
     "node": ">=20"
