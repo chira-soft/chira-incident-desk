@@ -1,0 +1,68 @@
+name: Incident Request
+description: Request a sanitized diagnosis or repair review
+title: "[Incident]: "
+labels: ["incident-intake"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, private customer data, wallet keys, or production database dumps.
+  - type: input
+    id: stack
+    attributes:
+      label: Technical stack
+      placeholder: Node.js 22, TypeScript, PostgreSQL, Docker, n8n...
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include sanitized errors and the business impact.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence available.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Redact secrets and customer information.
+  - type: dropdown
+    id: access
+    attributes:
+      label: Repository access
+      options:
+        - Public repository
+        - Sanitized reproduction repository
+        - Private repository after agreement
+        - No repository yet
+    validations:
+      required: true
+  - type: input
+    id: budget
+    attributes:
+      label: Budget range
+      placeholder: USD 150–250
+  - type: input
+    id: deadline
+    attributes:
+      label: Required deadline and timezone
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization
+      options:
+        - label: I am authorized to request work on this system and have removed secrets and regulated personal data.
+          required: true
