@@ -36,6 +36,26 @@ const CLAIM_PATTERNS = [
   /\bpayment (?:sent|completed)\b/i,
 ];
 
+const FUNDING_PENDING_PATTERNS = [
+  /\bbeing created\b/i,
+  /\bnext,? fund\b/i,
+  /\bfund(?: the)? escrow\b.{0,100}\bactivate\b/i,
+  /\bto activate it\b/i,
+  /\bawaiting funding\b/i,
+  /\bpending funding\b/i,
+  /\bnot funded\b/i,
+];
+
+const FUNDING_CONFIRMED_PATTERNS = [
+  /\bbounty (?:is|has been) funded\b/i,
+  /\bescrow (?:is|has been) funded\b/i,
+  /\bfunding confirmed\b/i,
+  /\bbounty activated\b/i,
+  /\bescrow activated\b/i,
+  /\bpayment escrowed\b/i,
+  /\bfunds (?:are|have been) locked\b/i,
+];
+
 function parseNumber(value, fallback) {
   if (!value) return fallback;
   const parsed = Number(value);
@@ -51,6 +71,7 @@ function daysSince(iso, now = new Date()) {
 }
 
 function isRecent(iso, days, now = new Date()) {
+  if (!iso) return false;
   return now.getTime() - new Date(iso).getTime() <= days * DAY_MS;
 }
 
@@ -62,6 +83,28 @@ function unique(values) {
   return [...new Set(values)];
 }
 
+function hasDirectPaymentContext(text = "") {
+  return [
+    /\/bounty\s+(?:\$|USD\s*|USDC\s*)?\d/i,
+    /\bbounty\b.{0,100}(?:\$\s*\d|USD\s*\d|USDC\s*\d)/i,
+    /(?:\$\s*\d|USD\s*\d|USDC\s*\d).{0,100}\bbounty\b/i,
+    /\breward\b.{0,100}(?:\$\s*\d|USD\s*\d|USDC\s*\d)/i,
+    /(?:\$\s*\d|USD\s*\d|USDC\s*\d).{0,100}\breward\b/i,
+    /\b(?:funded|funding|escrow|payment)\b.{0,120}(?:\$\s*\d|USD\s*\d|USDC\s*\d)/i,
+    /\bDevAsign Bounty\b/i,
+    /\bAlgora\b.{0,100}\bbounty\b/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function detectFundingStatus(texts) {
+  const text = texts.join("\n");
+  // Pending wins over generic template text such as "funds are locked" that may
+  // describe the mechanism while the sponsor is still being asked to fund it.
+  if (textMatchesAny(text, FUNDING_PENDING_PATTERNS)) return "pending";
+  if (textMatchesAny(text, FUNDING_CONFIRMED_PATTERNS)) return "confirmed";
+  return texts.length > 0 ? "offered" : "unknown";
+}
+
 export function extractPaymentEvidence(texts) {
   const signals = [];
   const amounts = [];
@@ -70,17 +113,24 @@ export function extractPaymentEvidence(texts) {
     const text = raw ?? "";
     if (/\/bounty\b/i.test(text)) signals.push("/bounty command");
     if (/algora/i.test(text)) signals.push("Algora reference");
+    if (/\bdevasign bounty\b/i.test(text)) signals.push("DevAsign bounty");
     if (/\bescrow\b/i.test(text)) signals.push("escrow reference");
     if (/\bfunded\b/i.test(text)) signals.push("funded reference");
     if (/\bUSDC\b/i.test(text)) signals.push("USDC reference");
 
-    for (const match of text.matchAll(/\/bounty\s+(?:\$|USD\s*)?(\d+(?:\.\d{1,2})?)/gi)) {
+    for (const match of text.matchAll(/\/bounty\s+(?:\$|USD\s*|USDC\s*)?(\d+(?:\.\d{1,2})?)/gi)) {
       const amount = Number(match[1]);
-      if (Number.isFinite(amount)) amounts.push({ amount, currency: "USD" });
+      if (Number.isFinite(amount)) amounts.push({ amount, currency: /USDC/i.test(match[0]) ? "USDC" : "USD" });
     }
-    for (const match of text.matchAll(/\$\s*(\d{2,6}(?:\.\d{1,2})?)(?!\d)/g)) {
+    for (const match of text.matchAll(/\bbounty(?:\s+of|\s*:)?\s*(?:\$\s*|USD\s*|USDC\s*)?(\d+(?:\.\d{1,2})?)\s*(USDC|USD)?/gi)) {
       const amount = Number(match[1]);
-      if (Number.isFinite(amount)) amounts.push({ amount, currency: "USD" });
+      const currency = /USDC/i.test(match[0]) || match[2]?.toUpperCase() === "USDC" ? "USDC" : "USD";
+      if (Number.isFinite(amount)) amounts.push({ amount, currency });
+    }
+    for (const match of text.matchAll(/\breward(?:\s+of|\s*:)?\s*(?:\$\s*|USD\s*|USDC\s*)?(\d+(?:\.\d{1,2})?)\s*(USDC|USD)?/gi)) {
+      const amount = Number(match[1]);
+      const currency = /USDC/i.test(match[0]) || match[2]?.toUpperCase() === "USDC" ? "USDC" : "USD";
+      if (Number.isFinite(amount)) amounts.push({ amount, currency });
     }
     // The negative lookbehind prevents protocol names such as x402 from being
     // interpreted as a 402-unit payment when USDC appears nearby.
@@ -101,14 +151,13 @@ export function extractPaymentEvidence(texts) {
     amount: best?.amount ?? null,
     currency: best?.currency ?? "UNKNOWN",
     signals: unique(signals),
+    fundingStatus: detectFundingStatus(texts),
   };
 }
 
 export function buildCandidate(issue, repository, comments, linkedOpenPullRequests, config, now = new Date()) {
   const issueText = `${issue.title}\n${issue.body ?? ""}`;
-  const recentComments = comments.filter((comment) =>
-    isRecent(comment.created_at, config.recentAttemptDays, now),
-  );
+  const recentComments = comments.filter((comment) => isRecent(comment.created_at, config.recentAttemptDays, now));
 
   const recentAttemptUsers = unique(
     recentComments
@@ -127,20 +176,23 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     ["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.author_association),
   );
 
-  const texts = [issueText, ...comments.map((comment) => comment.body ?? "")];
-  const payment = extractPaymentEvidence(texts);
   const labels = issue.labels.map((label) => typeof label === "string" ? label : label.name);
-  if (labels.some((label) => /bounty|reward|funded/i.test(label))) {
-    payment.signals.push("bounty/reward label");
-    payment.signals = unique(payment.signals);
+  const hasBountyLabel = labels.some((label) => /bounty|reward|funded/i.test(label));
+  const paymentTexts = [];
+  if (hasDirectPaymentContext(issueText) || (hasBountyLabel && /(?:\$\s*\d|USD\s*\d|USDC\s*\d)/i.test(issueText))) {
+    paymentTexts.push(issueText);
   }
+  for (const comment of comments) {
+    const body = comment.body ?? "";
+    if (hasDirectPaymentContext(body)) paymentTexts.push(body);
+  }
+  const payment = extractPaymentEvidence(paymentTexts);
+  if (hasBountyLabel) payment.signals = unique([...payment.signals, "bounty/reward label"]);
 
   const reasons = [];
   const warnings = [];
   let score = 0;
-  const isAggregator =
-    AGGREGATOR_PATTERNS.some((pattern) => pattern.test(issueText)) ||
-    /(?:^|\/)bountyscout$/i.test(repository.full_name);
+  const isAggregator = AGGREGATOR_PATTERNS.some((pattern) => pattern.test(issueText)) || /(?:^|\/)bountyscout$/i.test(repository.full_name);
 
   if (isAggregator) {
     score -= 60;
@@ -209,7 +261,7 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     score += 15;
     reasons.push(`payment signals: ${payment.signals.join(", ")}`);
   } else {
-    warnings.push("no recognizable funding signal");
+    warnings.push("no recognizable direct payment signal");
   }
 
   if (payment.amount !== null) {
@@ -219,12 +271,20 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     else if (payment.amount >= config.minAmount) score += 5;
     else warnings.push(`amount below configured minimum: ${payment.amount}`);
   } else {
-    warnings.push("amount not detected");
+    warnings.push("amount not detected from a direct bounty/reward context");
   }
 
-  const hasReproductionEvidence = REPRO_TERMS.some((term) =>
-    issueText.toLowerCase().includes(term),
-  );
+  if (payment.fundingStatus === "confirmed") {
+    score += 15;
+    reasons.push("funding/escrow appears confirmed");
+  } else if (payment.fundingStatus === "pending") {
+    score -= 5;
+    warnings.push("funding appears pending; do not start work");
+  } else if (payment.fundingStatus === "offered") {
+    warnings.push("payment offered but funding not independently confirmed");
+  }
+
+  const hasReproductionEvidence = REPRO_TERMS.some((term) => issueText.toLowerCase().includes(term));
   if (hasReproductionEvidence) {
     score += 10;
     reasons.push("reproduction or acceptance evidence present");
@@ -243,12 +303,10 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     score -= 10;
     warnings.push(`high discussion volume: ${issue.comments} comments`);
   }
-
   if (recentClaimUsers.length > 0) {
     score -= 35;
     warnings.push(`recent claim/reward signal from: ${recentClaimUsers.join(", ")}`);
   }
-
   if (repository.archived || repository.disabled) {
     score -= 100;
     warnings.push("repository is archived or disabled");
@@ -257,17 +315,14 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
   score = Math.max(0, Math.min(100, score));
 
   const amountPass = payment.amount !== null && payment.amount >= config.minAmount;
-  const qualified =
-    score >= config.minScore &&
-    amountPass &&
-    payment.signals.length > 0 &&
-    (issue.assignees ?? []).length === 0 &&
-    recentAttemptUsers.length <= 1 &&
-    recentClaimUsers.length === 0 &&
-    linkedOpenPullRequests.length === 0 &&
-    !repository.archived &&
-    !repository.disabled &&
-    !isAggregator;
+  const baseEligibility =
+    score >= config.minScore && amountPass && payment.signals.length > 0 &&
+    (issue.assignees ?? []).length === 0 && recentAttemptUsers.length <= 1 &&
+    recentClaimUsers.length === 0 && linkedOpenPullRequests.length === 0 &&
+    !repository.archived && !repository.disabled && !isAggregator;
+
+  const qualified = baseEligibility && payment.fundingStatus === "confirmed";
+  const preflight = baseEligibility && payment.fundingStatus !== "confirmed";
 
   return {
     repository: repository.full_name,
@@ -291,6 +346,7 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     payment,
     score,
     qualified,
+    preflight,
     reasons,
     warnings,
   };
