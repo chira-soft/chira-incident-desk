@@ -33,6 +33,7 @@ function loadConfig() {
     minScore: loadNumericConfig("RADAR_MIN_SCORE", 75),
     recentAttemptDays: loadNumericConfig("RADAR_RECENT_ATTEMPT_DAYS", 45),
     requestDelayMs: loadNumericConfig("RADAR_REQUEST_DELAY_MS", 350),
+    maxPerRepository: loadNumericConfig("RADAR_MAX_PER_REPOSITORY", 3),
     preferredLanguages,
     outputDirectory: path.resolve(process.cwd(), "output"),
   };
@@ -42,8 +43,22 @@ function dedupeIssues(items) {
   const byUrl = new Map();
   for (const item of items) byUrl.set(item.html_url, item);
   return [...byUrl.values()].sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
   );
+}
+
+function selectDiverseIssues(items, maxCandidates, maxPerRepository) {
+  const selected = [];
+  const counts = new Map();
+  for (const item of items) {
+    const key = item.repository_url ?? item.html_url.split("/issues/")[0];
+    const count = counts.get(key) ?? 0;
+    if (count >= maxPerRepository) continue;
+    selected.push(item);
+    counts.set(key, count + 1);
+    if (selected.length >= maxCandidates) break;
+  }
+  return selected;
 }
 
 function escapeCell(value) {
@@ -105,6 +120,7 @@ This is a conservative discovery report. **Do not claim or implement a task unti
 - Minimum amount: ${config.minAmount}
 - Minimum score: ${config.minScore}
 - Maximum candidates: ${config.maxCandidates}
+- Maximum per repository: ${config.maxPerRepository}
 
 ## Qualified for human preflight (${qualified.length})
 
@@ -126,11 +142,11 @@ async function main() {
   const client = new GitHubClient(config.token, config.requestDelayMs);
   const since = isoDateDaysAgo(config.lookbackDays);
   const queries = [
-    `is:issue is:open created:>=${since} label:bounty`,
-    `is:issue is:open created:>=${since} in:title bounty`,
-    `is:issue is:open created:>=${since} in:comments \"/bounty\"`,
-    `is:issue is:open created:>=${since} in:title reward`,
-    `is:issue is:open created:>=${since} in:body USDC`,
+    `is:issue is:open updated:>=${since} label:bounty`,
+    `is:issue is:open updated:>=${since} in:title bounty`,
+    `is:issue is:open updated:>=${since} in:comments \"/bounty\"`,
+    `is:issue is:open updated:>=${since} in:title reward`,
+    `is:issue is:open updated:>=${since} in:body USDC`,
   ];
 
   const discovered = [];
@@ -139,7 +155,11 @@ async function main() {
     discovered.push(...await client.searchIssues(query, 100));
   }
 
-  const issues = dedupeIssues(discovered).slice(0, config.maxCandidates);
+  const issues = selectDiverseIssues(
+    dedupeIssues(discovered),
+    config.maxCandidates,
+    config.maxPerRepository,
+  );
   console.log(`Evaluating ${issues.length} unique candidates.`);
   const candidates = [];
 
@@ -153,7 +173,6 @@ async function main() {
       const linkedPullRequests = await client.findLinkedOpenPullRequests(
         repository.full_name,
         issue.number,
-        issue.html_url,
       );
       candidates.push(buildCandidate(issue, repository, comments, linkedPullRequests, config));
     } catch (error) {
