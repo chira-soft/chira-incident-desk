@@ -19,8 +19,11 @@ test("extracts an Algora-style bounty command without assuming funding", () => {
 });
 
 test("marks explicit bounty funding confirmation as confirmed", () => {
+  // Real marketplaces often announce the amount first and confirm funding in a
+  // later bot/maintainer comment, so test the two pieces independently.
   const result = extractPaymentEvidence([
-    "Algora bounty is funded. Funding confirmed and payment escrowed: $250.",
+    "/bounty $250",
+    "Bounty is funded. Funding confirmed and payment escrowed.",
   ]);
   assert.equal(result.amount, 250);
   assert.equal(result.currency, "USD");
