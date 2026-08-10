@@ -1,0 +1,55 @@
+name: Verified Bounty Radar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: radar
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RADAR_LOOKBACK_DAYS: "14"
+      RADAR_MAX_CANDIDATES: "30"
+      RADAR_MIN_AMOUNT: "50"
+      RADAR_MIN_SCORE: "75"
+      RADAR_RECENT_ATTEMPT_DAYS: "45"
+      RADAR_REQUEST_DELAY_MS: "350"
+      RADAR_PREFERRED_LANGUAGES: "TypeScript,JavaScript,Java,Python,PHP,Dockerfile,Shell"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run verified radar
+        run: npm run radar
+
+      - name: Add report to job summary
+        if: always()
+        run: |
+          if [ -f output/opportunities.md ]; then
+            cat output/opportunities.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload radar report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-bounty-radar-${{ github.run_number }}
+          path: radar/output/
+          retention-days: 14
