@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import { GitHubClient } from "./github.mjs";
 import { buildCandidate, loadNumericConfig } from "./scoring.mjs";
+import { discoverSuperteamOpportunities } from "./superteam.mjs";
 
 function requiredToken() {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
@@ -21,6 +22,7 @@ function loadConfig() {
   );
   return {
     token: requiredToken(),
+    superteamApiKey: process.env.SUPERTEAM_AGENT_API_KEY ?? "",
     lookbackDays: loadNumericConfig("RADAR_LOOKBACK_DAYS", 14),
     maxCandidates: loadNumericConfig("RADAR_MAX_CANDIDATES", 30),
     minAmount: loadNumericConfig("RADAR_MIN_AMOUNT", 50),
@@ -28,6 +30,10 @@ function loadConfig() {
     recentAttemptDays: loadNumericConfig("RADAR_RECENT_ATTEMPT_DAYS", 45),
     requestDelayMs: loadNumericConfig("RADAR_REQUEST_DELAY_MS", 350),
     maxPerRepository: loadNumericConfig("RADAR_MAX_PER_REPOSITORY", 3),
+    superteamMinReward: loadNumericConfig("SUPERTEAM_MIN_REWARD", 100),
+    superteamMinScore: loadNumericConfig("SUPERTEAM_MIN_SCORE", 75),
+    superteamMaxCandidates: loadNumericConfig("SUPERTEAM_MAX_CANDIDATES", 50),
+    superteamMaxSubmissions: loadNumericConfig("SUPERTEAM_MAX_SUBMISSIONS", 50),
     preferredLanguages,
     outputDirectory: path.resolve(process.cwd(), "output"),
   };
@@ -67,7 +73,7 @@ function competitionLabel(candidate) {
   return `${candidate.recentAttemptUsers.length} attempts / ${candidate.linkedOpenPullRequests.length} PRs / ${candidate.assignees.length} assignees`;
 }
 
-function renderTable(candidates) {
+function renderGitHubTable(candidates) {
   if (candidates.length === 0) return "_No candidates in this section._\n";
   const rows = candidates.map((candidate) =>
     `| ${candidate.score} | ${escapeCell(amountLabel(candidate))} | ${escapeCell(candidate.payment.fundingStatus)} | ${escapeCell(candidate.repositoryLanguage ?? "Unknown")} | ${escapeCell(competitionLabel(candidate))} | ${candidate.ageDays}d | [${escapeCell(`${candidate.repository}#${candidate.issueNumber}`)}](${candidate.url}) — ${escapeCell(candidate.title)} |`,
@@ -80,7 +86,20 @@ function renderTable(candidates) {
   ].join("\n");
 }
 
-function renderMarkdown(candidates, config) {
+function renderSuperteamTable(candidates) {
+  if (candidates.length === 0) return "_No active Superteam candidates in this section._\n";
+  const rows = candidates.map((candidate) =>
+    `| ${candidate.score} | ${escapeCell(`${candidate.token} ${candidate.rewardAmount}`)} | ${escapeCell(candidate.type)} | ${escapeCell(candidate.agentAccess)} | ${candidate.submissions} | ${candidate.deadlineDays ?? "?"}d | ${escapeCell(candidate.sponsor)} | [${escapeCell(candidate.title)}](${candidate.url}) |`,
+  );
+  return [
+    "| Score | Reward pool | Type | Agent access | Submissions | Time left | Sponsor | Listing |",
+    "|---:|---:|---|---|---:|---:|---|---|",
+    ...rows,
+    "",
+  ].join("\n");
+}
+
+function renderGitHubSections(candidates, config) {
   const sorted = [...candidates].sort((a, b) => b.score - a.score);
   const ready = sorted.filter((candidate) => candidate.qualified);
   const preflight = sorted.filter((candidate) => candidate.preflight);
@@ -104,42 +123,98 @@ function renderMarkdown(candidates, config) {
 `;
   }).join("\n");
 
-  return `# Verified Bounty Radar
+  return `## GitHub bounty radar
 
-Generated: ${new Date().toISOString()}
+### Ready — funding appears confirmed (${ready.length})
 
-This is a conservative discovery report. **Do not claim or implement a task until funding, payout eligibility, assignment, competing pull requests, and maintainer acceptance are verified.**
-
-## Configuration
-
-- Lookback: ${config.lookbackDays} days
-- Minimum amount: ${config.minAmount}
-- Minimum score: ${config.minScore}
-- Maximum candidates: ${config.maxCandidates}
-- Maximum per repository: ${config.maxPerRepository}
-
-## Ready — funding appears confirmed (${ready.length})
-
-${renderTable(ready)}
-## Payment/funding preflight (${preflight.length})
+${renderGitHubTable(ready)}
+### Payment/funding preflight (${preflight.length})
 
 These are promising leads, but **do not start implementation yet**. Confirm that the bounty is funded/active and that we are eligible or delegated to claim it.
 
-${renderTable(preflight)}
-## Watchlist (${watch.length})
+${renderGitHubTable(preflight)}
+### Watchlist (${watch.length})
 
-${renderTable(watch)}
-## Rejected by score (${rejected.length})
+${renderGitHubTable(watch)}
+### Rejected by score (${rejected.length})
 
-${renderTable(rejected.slice(0, 20))}
-## Candidate details
+${renderGitHubTable(rejected.slice(0, 20))}
+### GitHub candidate details
 
-${details || "_No candidates found._\n"}
+${details || "_No GitHub candidates found._\n"}
 `;
 }
 
-async function main() {
-  const config = loadConfig();
+function renderSuperteamSections(superteam, config) {
+  if (!superteam.enabled) {
+    return `## Superteam Agent radar\n\n_Disabled: SUPERTEAM_AGENT_API_KEY is not configured._\n`;
+  }
+  if (superteam.error) {
+    return `## Superteam Agent radar\n\n⚠️ Superteam scan failed: ${escapeCell(superteam.error)}\n`;
+  }
+
+  const sorted = [...superteam.candidates].sort((a, b) => b.score - a.score);
+  const actionable = sorted.filter((candidate) => candidate.actionable);
+  const watch = sorted.filter((candidate) => !candidate.actionable && candidate.score >= Math.max(50, config.superteamMinScore - 20));
+
+  const details = sorted.slice(0, 12).map((candidate) => `### ${candidate.actionable ? "✅" : "⚠️"} Superteam — ${candidate.score}/100 — ${candidate.title}
+
+- **Reward pool:** ${candidate.token} ${candidate.rewardAmount}
+- **Type:** ${candidate.type}
+- **Agent access:** ${candidate.agentAccess}
+- **Submissions:** ${candidate.submissions}
+- **Deadline:** ${candidate.deadline} (${candidate.deadlineDays ?? "?"} days left)
+- **Sponsor:** ${candidate.sponsor}${candidate.sponsorVerified ? " (verified)" : ""}
+- **Technical matches:** ${candidate.techMatches.join(", ") || "None detected"}
+- **Reasons:** ${candidate.reasons.join("; ") || "None"}
+- **Warnings:** ${candidate.warnings.join("; ") || "None"}
+- **Listing:** ${candidate.url}
+`).join("\n");
+
+  return `## Superteam Agent radar
+
+The API may return stale records marked OPEN, so CHIRA independently requires a future deadline and no announced winner before scoring them.
+
+- Listings fetched: ${superteam.fetched}
+- Stale/expired/winner-announced excluded before scoring: ${superteam.staleExcluded}
+- Minimum reward pool: ${config.superteamMinReward}
+- Maximum submissions for actionable status: ${config.superteamMaxSubmissions}
+
+### Actionable agent opportunities (${actionable.length})
+
+${renderSuperteamTable(actionable)}
+### Superteam watchlist (${watch.length})
+
+${renderSuperteamTable(watch)}
+### Superteam candidate details
+
+${details || "_No active agent-eligible Superteam listings found._\n"}
+`;
+}
+
+function renderMarkdown(githubCandidates, superteam, config) {
+  return `# CHIRA Income Radar
+
+Generated: ${new Date().toISOString()}
+
+This is a conservative discovery report. **Human review is required before claiming, submitting, spending money, signing a wallet transaction, or starting implementation.**
+
+## Configuration
+
+- GitHub lookback: ${config.lookbackDays} days
+- GitHub minimum amount: ${config.minAmount}
+- GitHub minimum score: ${config.minScore}
+- GitHub maximum candidates: ${config.maxCandidates}
+- GitHub maximum per repository: ${config.maxPerRepository}
+- Superteam minimum reward: ${config.superteamMinReward}
+- Superteam minimum score: ${config.superteamMinScore}
+
+${renderGitHubSections(githubCandidates, config)}
+${renderSuperteamSections(superteam, config)}
+`;
+}
+
+async function scanGitHub(config) {
   const client = new GitHubClient(config.token, config.requestDelayMs);
   const since = isoDateDaysAgo(config.lookbackDays);
   const queries = [
@@ -152,16 +227,16 @@ async function main() {
 
   const discovered = [];
   for (const query of queries) {
-    console.log(`Searching: ${query}`);
+    console.log(`GitHub search: ${query}`);
     discovered.push(...await client.searchIssues(query, 100));
   }
 
   const issues = selectDiverseIssues(dedupeIssues(discovered), config.maxCandidates, config.maxPerRepository);
-  console.log(`Evaluating ${issues.length} unique candidates.`);
+  console.log(`Evaluating ${issues.length} GitHub candidates.`);
   const candidates = [];
 
   for (const [index, issue] of issues.entries()) {
-    console.log(`[${index + 1}/${issues.length}] ${issue.html_url}`);
+    console.log(`[GitHub ${index + 1}/${issues.length}] ${issue.html_url}`);
     try {
       const [repository, comments] = await Promise.all([
         client.getRepository(issue.repository_url),
@@ -170,19 +245,52 @@ async function main() {
       const linkedPullRequests = await client.findLinkedOpenPullRequests(repository.full_name, issue.number);
       candidates.push(buildCandidate(issue, repository, comments, linkedPullRequests, config));
     } catch (error) {
-      console.error(`Candidate skipped: ${issue.html_url}`, error.message);
+      console.error(`GitHub candidate skipped: ${issue.html_url}`, error.message);
     }
   }
+  return candidates;
+}
+
+async function scanSuperteam(config) {
+  if (!config.superteamApiKey) {
+    return { enabled: false, error: null, fetched: 0, staleExcluded: 0, candidates: [] };
+  }
+
+  try {
+    const result = await discoverSuperteamOpportunities(config.superteamApiKey, {
+      minReward: config.superteamMinReward,
+      minScore: config.superteamMinScore,
+      maxCandidates: config.superteamMaxCandidates,
+      maxSubmissions: config.superteamMaxSubmissions,
+    });
+    return { enabled: true, error: null, ...result };
+  } catch (error) {
+    console.error("Superteam scan failed:", error.message);
+    return { enabled: true, error: error.message, fetched: 0, staleExcluded: 0, candidates: [] };
+  }
+}
+
+async function main() {
+  const config = loadConfig();
+  const githubCandidates = await scanGitHub(config);
+  const superteam = await scanSuperteam(config);
 
   await mkdir(config.outputDirectory, { recursive: true });
   const jsonPath = path.join(config.outputDirectory, "opportunities.json");
   const markdownPath = path.join(config.outputDirectory, "opportunities.md");
-  await writeFile(jsonPath, JSON.stringify(candidates, null, 2), "utf8");
-  await writeFile(markdownPath, renderMarkdown(candidates, config), "utf8");
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    github: githubCandidates,
+    superteam,
+  };
 
-  const ready = candidates.filter((candidate) => candidate.qualified).length;
-  const preflight = candidates.filter((candidate) => candidate.preflight).length;
-  console.log(`Done. Ready=${ready}, preflight=${preflight}, evaluated=${candidates.length}`);
+  await writeFile(jsonPath, JSON.stringify(payload, null, 2), "utf8");
+  await writeFile(markdownPath, renderMarkdown(githubCandidates, superteam, config), "utf8");
+
+  const githubReady = githubCandidates.filter((candidate) => candidate.qualified).length;
+  const githubPreflight = githubCandidates.filter((candidate) => candidate.preflight).length;
+  const superteamActionable = superteam.candidates.filter((candidate) => candidate.actionable).length;
+  console.log(`Done. GitHub ready=${githubReady}, preflight=${githubPreflight}; Superteam actionable=${superteamActionable}; Superteam stale excluded=${superteam.staleExcluded}`);
   console.log(markdownPath);
 }
 
