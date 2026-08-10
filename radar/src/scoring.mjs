@@ -21,6 +21,13 @@ const ATTEMPT_PATTERNS = [
   /\bi(?:'|’)d like to work on this\b/i,
 ];
 
+const AGGREGATOR_PATTERNS = [
+  /\bdiscovery digest\b/i,
+  /\bbounty alert\b/i,
+  /\bopportunit(?:y|ies) found\b/i,
+  /\bweekly digest\b/i,
+];
+
 const CLAIM_PATTERNS = [
   /\/claim\b/i,
   /\breward(?:ed)?\b/i,
@@ -75,9 +82,16 @@ export function extractPaymentEvidence(texts) {
       const amount = Number(match[1]);
       if (Number.isFinite(amount)) amounts.push({ amount, currency: "USD" });
     }
-    for (const match of text.matchAll(/(\d+(?:\.\d{1,2})?)\s*(USDC|USD)\b/gi)) {
+    // The negative lookbehind prevents protocol names such as x402 from being
+    // interpreted as a 402-unit payment when USDC appears nearby.
+    for (const match of text.matchAll(/(?<![A-Za-z0-9_])(\d+(?:\.\d{1,2})?)\s*(USDC|USD)\b/gi)) {
       const amount = Number(match[1]);
       const currency = match[2]?.toUpperCase() === "USDC" ? "USDC" : "USD";
+      if (Number.isFinite(amount)) amounts.push({ amount, currency });
+    }
+    for (const match of text.matchAll(/\b(USDC|USD)\s*(?:\$\s*)?(\d+(?:\.\d{1,2})?)(?!\d)/gi)) {
+      const amount = Number(match[2]);
+      const currency = match[1]?.toUpperCase() === "USDC" ? "USDC" : "USD";
       if (Number.isFinite(amount)) amounts.push({ amount, currency });
     }
   }
@@ -124,6 +138,15 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
   const reasons = [];
   const warnings = [];
   let score = 0;
+  const isAggregator =
+    AGGREGATOR_PATTERNS.some((pattern) => pattern.test(issueText)) ||
+    /(?:^|\/)bountyscout$/i.test(repository.full_name);
+
+  if (isAggregator) {
+    score -= 60;
+    warnings.push("aggregator/digest issue, not a direct paid work item");
+  }
+
   const ageDays = daysSince(issue.created_at, now);
   const language = repository.language;
 
@@ -243,7 +266,8 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     recentClaimUsers.length === 0 &&
     linkedOpenPullRequests.length === 0 &&
     !repository.archived &&
-    !repository.disabled;
+    !repository.disabled &&
+    !isAggregator;
 
   return {
     repository: repository.full_name,
@@ -263,6 +287,7 @@ export function buildCandidate(issue, repository, comments, linkedOpenPullReques
     linkedOpenPullRequests,
     maintainerRecent,
     hasReproductionEvidence,
+    isAggregator,
     payment,
     score,
     qualified,
