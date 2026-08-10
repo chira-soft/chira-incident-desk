@@ -25,6 +25,22 @@ function searchableText(listing, details) {
   return `${listing?.title ?? ""}\n${listing?.slug ?? ""}\n${JSON.stringify(details ?? {})}`.toLowerCase();
 }
 
+function unwrapListings(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.data)) return raw.data;
+  return [];
+}
+
+function dedupeListings(items) {
+  const seen = new Map();
+  for (const item of items) {
+    if (!item) continue;
+    const key = item.id ?? item.slug;
+    if (key) seen.set(key, item);
+  }
+  return [...seen.values()];
+}
+
 export function isSuperteamListingActive(listing, now = new Date()) {
   if (!listing || listing.status !== "OPEN") return false;
   if (listing.isWinnersAnnounced === true) return false;
@@ -194,8 +210,12 @@ export class SuperteamClient {
     return response.json();
   }
 
-  async listLive(take = 50) {
-    return this.request(`/api/agents/listings/live?take=${encodeURIComponent(take)}`);
+  async listLive({ take = 50, type = null, deadline = null } = {}) {
+    const params = new URLSearchParams();
+    params.set("take", String(take));
+    if (type) params.set("type", type);
+    if (deadline) params.set("deadline", deadline);
+    return this.request(`/api/agents/listings/live?${params.toString()}`);
   }
 
   async getDetails(slug) {
@@ -205,8 +225,24 @@ export class SuperteamClient {
 
 export async function discoverSuperteamOpportunities(apiKey, config, now = new Date()) {
   const client = new SuperteamClient(apiKey);
-  const raw = await client.listLive(config.maxCandidates);
-  const listings = Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : [];
+  const deadline = `${now.getUTCFullYear()}-12-31`;
+  const types = [null, "bounty", "project", "hackathon"];
+  const batches = [];
+
+  for (const type of types) {
+    try {
+      const raw = await client.listLive({
+        take: config.maxCandidates,
+        type,
+        deadline,
+      });
+      batches.push(...unwrapListings(raw));
+    } catch (error) {
+      console.warn(`Superteam listing query skipped (${type ?? "all"}): ${error.message}`);
+    }
+  }
+
+  const listings = dedupeListings(batches);
   const active = listings
     .filter((listing) => isSuperteamListingActive(listing, now))
     .sort((a, b) => numberOr(b.rewardAmount) - numberOr(a.rewardAmount));
